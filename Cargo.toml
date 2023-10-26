@@ -77,8 +77,10 @@ telemetry = [ 'adnl/telemetry', 'dht/telemetry', 'rldp/telemetry', 'overlay/tele
 trace_alloc = [  ]
 trace_alloc_detail = [ 'trace_alloc' ]
 
-[profile]
+[patch.'https://github.com/tonlabs/ever-adnl.git']
+adnl = { git = 'https://www.github.com/tonlabs/ever-adnl.git', branch = '_test', features = [ 'client', 'node', 'server' ] }
 
+[profile]
 
 [target.'cfg(unix)'.dependencies.rdkafka]
 optional = true
