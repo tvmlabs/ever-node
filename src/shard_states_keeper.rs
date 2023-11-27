@@ -388,7 +388,7 @@ impl ShardStatesKeeper {
 
         log::info!(
             "check_and_store_state: deserialized (low_memory_mode: {}) {} TIME {}",
-            handle.id(), low_memory_mode, now.elapsed().as_millis()
+            low_memory_mode, handle.id(), now.elapsed().as_millis()
         );
 
         let state = self.build_state_object(state_root, handle.id(), handle.is_queue_update_for())?;

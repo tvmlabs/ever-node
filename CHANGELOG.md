@@ -2,6 +2,10 @@
 
 All notable changes to this project will be documented in this file.
 
+## Version 0.55.72
+
+- Try to use old persistent states in cold boot if newest one is not ready yet
+
 ## Version 0.55.71
 
 - Move cleaning outdated Catchain caches on node startup into separate thread

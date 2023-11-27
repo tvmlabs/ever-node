@@ -70,15 +70,15 @@ async fn download_persistent_state_iter(
         check_stop()?;
         if let Some(remained) = attempts.as_mut() {
             if *remained == 0 {
-                fail!("Can't find peer to load {} {}", descr, id.shard())
+                fail!("Can't find peer to load {} {}", descr, id)
             }
             *remained -= 1;
         }
         match overlay.check_persistent_state(id, msg_queue_for, master_id, active_peers).await {
             Err(e) => 
-                log::trace!("check_persistent_state descr {} {}: {}", descr, id.shard(), e),
+                log::warn!("check_persistent_state descr {}: {}, {}: {}", descr, id.shard(), id.seq_no(), e),
             Ok(None) => 
-                log::trace!("download_persistent_state {}: {} not found!", descr, id.shard()),
+                log::warn!("download_persistent_state {}: {}, {} not found!", descr, id.shard(), id.seq_no()),
             Ok(Some(p)) => 
                 break p
         }
