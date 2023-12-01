@@ -100,6 +100,10 @@ use crate::config::{
 //maximum number of validated block stats entries in engine's queue
 const MAX_VALIDATED_BLOCK_STATS_ENTRIES_COUNT: usize = 10000; 
 
+#[cfg(test)]
+#[path = "tests/test_engine.rs"]
+mod tests;
+
 pub struct Engine {
     db: Arc<InternalDb>,
     ext_db: Vec<Arc<dyn ExternalDb>>,
@@ -131,6 +135,8 @@ pub struct Engine {
     sync_status: AtomicU32,
     low_memory_mode: bool,
     remp_capability: AtomicBool,
+
+    smft_capability: AtomicBool,
 
     test_bundles_config: CollatorTestBundlesGeneralConfig,
     collator_config: CollatorConfig,
@@ -803,6 +809,7 @@ impl Engine {
             sync_status: AtomicU32::new(0),
             low_memory_mode,
             remp_capability: AtomicBool::new(false),
+            smft_capability: AtomicBool::new(false),
             test_bundles_config,
             collator_config,
             shard_states_keeper: shard_states_keeper.clone(),
@@ -951,6 +958,10 @@ impl Engine {
     ) -> Result<()> {
         let id = self.overlay_operations.calc_overlay_id(workchain, shard)?;
         self.overlay_operations.clone().add_overlay(id, !foreign).await
+    }
+
+    pub fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<overlay::OverlayShortId>, overlay::OverlayId)> {
+        self.overlay_operations.calc_overlay_id(workchain, shard)
     }
 
     pub fn shard_states_awaiters(&self) -> &AwaitersPool<BlockIdExt, Arc<ShardStateStuff>> {
@@ -1103,6 +1114,14 @@ impl Engine {
 
     pub fn set_remp_capability(&self, value: bool) {
         self.remp_capability.store(value, Ordering::Relaxed);
+    }
+
+    pub fn smft_capability(&self) -> bool {
+        self.smft_capability.load(Ordering::Relaxed)
+    }
+
+    pub fn set_smft_capability(&self, value: bool) {
+        self.smft_capability.store(value, Ordering::Relaxed);
     }
 
     pub fn split_queues_cache(&self) -> 
@@ -1419,6 +1438,10 @@ impl Engine {
                 block.get_config_params()?.has_capability(GlobalCapabilities::CapRemp),
                 Ordering::Relaxed
             );
+            self.smft_capability.store(
+                block.get_config_params()?.has_capability(GlobalCapabilities::CapSmft),
+                Ordering::Relaxed
+            );
             // While the node boots start key block is not processed by this function.
             // So see process_full_state_in_ext_db for the same code
         }
@@ -1533,7 +1556,7 @@ impl Engine {
                                 self.clone().process_queue_update_broadcast(broadcast, src);
                             }
                             Broadcast::TonNode_ExternalMessageBroadcast(broadcast) => {
-                                self.process_ext_msg_broadcast(broadcast, src);
+                                self.process_ext_msg_broadcast(broadcast, src).await;
                             }
                             Broadcast::TonNode_IhrMessageBroadcast(broadcast) => {
                                 log::trace!("TonNode_IhrMessageBroadcast from {}: {:?}", src, broadcast);
@@ -1543,6 +1566,9 @@ impl Engine {
                             }
                             Broadcast::TonNode_ConnectivityCheckBroadcast(broadcast) => {
                                 self.network.clone().process_connectivity_broadcast(broadcast);
+                            }
+                            Broadcast::TonNode_BlockCandidateBroadcast(broadcast) => {
+                                log::warn!("TonNode_BlockCandidateBroadcast from {}: {:?}", src, broadcast);
                             }
                         }
                     }
@@ -1759,7 +1785,7 @@ impl Engine {
         });
     }
 
-    fn process_ext_msg_broadcast(&self, broadcast: ExternalMessageBroadcast, src: Arc<KeyId>) {
+    async fn process_ext_msg_broadcast(&self, broadcast: ExternalMessageBroadcast, src: Arc<KeyId>) {
         let remp = self.remp_capability();
         // just add to list
         if !self.is_validator() {
@@ -1768,26 +1794,26 @@ impl Engine {
                 "Skipped ext message broadcast {}bytes from {}: NOT A VALIDATOR",
                 broadcast.message.data.0.len(), src
             );
-        } else if remp {
-            log::warn!(
-                "Skipped ext message broadcast {}bytes from {}: REMP CAPABILITY IS ENABLED",
-                broadcast.message.data.0.len(), src
-            );
         } else {
-            log::trace!("Processing ext message broadcast {}bytes from {}", broadcast.message.data.0.len(), src);
-            match self.external_messages().new_message_raw(&broadcast.message.data.0, self.now()) {
+            let bytes_len = broadcast.message.data.0.len();
+            let result = if remp {
+                self.push_message_to_remp(broadcast.message.data).await
+            } else {
+                self.external_messages().new_message_raw(&broadcast.message.data.0, self.now())
+            };
+            match result {
                 Err(e) => {
                     log::error!(
                         target: EXT_MESSAGES_TRACE_TARGET,
                         "Error while processing ext message broadcast {}bytes from {}: {}",
-                        broadcast.message.data.0.len(), src, e
+                        bytes_len, src, e
                     );
                 }
-                Ok(id) => {
+                Ok(_) => {
                     log::debug!(
                         target: EXT_MESSAGES_TRACE_TARGET,
-                        "Processed ext message broadcast {:x} {}bytes from {} (added into collator's queue)",
-                        id, broadcast.message.data.0.len(), src
+                        "Processed ext message broadcast {}bytes from {} (added into remp's queue)",
+                        bytes_len, src
                     );
                 }
             }
@@ -2381,6 +2407,10 @@ async fn boot(engine: &Arc<Engine>, zerostate_path: Option<&str>, hardfork_path:
             let state = engine.load_state(&block_id).await?;
             engine.remp_capability.store(
                 state.config_params()?.has_capability(GlobalCapabilities::CapRemp),
+                Ordering::Relaxed
+            );
+            engine.smft_capability.store(
+                state.config_params()?.has_capability(GlobalCapabilities::CapSmft),
                 Ordering::Relaxed
             );
             (block_id.clone(), false)

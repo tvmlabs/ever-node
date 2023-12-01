@@ -14,6 +14,7 @@
 use crate::validator::validator_group::{ValidatorGroup, ValidatorGroupStatus};
 use catchain::{CatchainReplayListener, utils::get_elapsed_time};
 use std::{fmt, time::{Duration, SystemTime, SystemTimeError}, sync::Arc};
+use std::time::Instant;
 use validator_session::*;
 
 pub struct OnBlockCommitted {
@@ -217,12 +218,12 @@ impl CatchainReplayListener for ValidatorSessionListener {
     }
 }
 
-async fn process_validation_action (action: ValidationAction, g: Arc<ValidatorGroup>) {
+async fn process_validation_action (action: ValidationAction, g: Arc<ValidatorGroup>, rt: tokio::runtime::Handle) {
     let action_str = format!("{}", action);
     let next_block_descr = g.get_next_block_descr().await;
     log::info!(target: "validator", "({}): Processing action: {}, {}", next_block_descr, action_str, g.info().await);
     match action {
-        ValidationAction::OnGenerateSlot {round, callback} => g.on_generate_slot (round, callback).await,
+        ValidationAction::OnGenerateSlot {round, callback} => g.on_generate_slot (round, callback, rt).await,
 
         ValidationAction::OnCandidate {round, source, root_hash, data, collated_data, callback} =>
             g.on_candidate (round, source, root_hash, data, collated_data, callback).await,
@@ -245,6 +246,7 @@ async fn process_validation_action (action: ValidationAction, g: Arc<ValidatorGr
 const VALIDATION_ACTION_TOO_LONG: Duration = Duration::from_secs(3);
 const QUEUE_EMPTY_TOO_LONG: Duration = Duration::from_secs(10);
 const QUEUE_POLLING_DELAY: Duration = Duration::from_millis(10);
+const RMQ_POLLING_DELAY: Duration = Duration::from_millis(50);
 
 pub async fn process_validation_queue(
     queue: Arc<crossbeam_channel::Receiver<ValidationAction>>,
@@ -253,10 +255,14 @@ pub async fn process_validation_queue(
 ) {
     let mut cur_round = 0;
     let mut last_action = SystemTime::now();
+    let mut last_rmq_poll = Instant::now() - RMQ_POLLING_DELAY;
 
     'queue_loop: while g.clone().get_status().await < ValidatorGroupStatus::Stopping {
         // Checking REMP messages
-        g.poll_rmq().await;
+        if last_rmq_poll.elapsed() >= RMQ_POLLING_DELAY {
+            g.poll_rmq().await;
+            last_rmq_poll = Instant::now();
+        }
 
         let g_clone = g.clone();
         let g_info = g_clone.info().await;
@@ -310,8 +316,9 @@ pub async fn process_validation_queue(
                 }
 
                 let start_time = SystemTime::now();
+                let rt_clone = rt.clone();
                 let mut join_handle = rt.spawn(async move {
-                    process_validation_action (action, g_clone).await;
+                    process_validation_action (action, g_clone, rt_clone).await;
                 });
 
                 loop {

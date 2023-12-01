@@ -55,7 +55,7 @@ use ton_api::{
     ton::ton_node::{
         RempMessage, RempMessageStatus, RempReceipt, 
         broadcast::{BlockBroadcast, QueueUpdateBroadcast}
-    }
+    }, IntoBoxed
 };
 use ton_block::{
     MASTERCHAIN_ID, SHARD_FULL, GlobalCapabilities, OutMsgQueue,
@@ -111,12 +111,20 @@ impl EngineOperations for Engine {
         self.network().activate_validator_list(validator_list_id)
     }
 
+    async fn get_validator_bls_key(&self, key_id: &Arc<KeyId>) -> Option<Arc<dyn KeyOption>> {
+        self.network().get_validator_bls_key(key_id).await
+    }
+
     fn set_sync_status(&self, status: u32) {
         self.set_sync_status(status);
     }
 
     fn get_sync_status(&self) -> u32 {
         self.get_sync_status()
+    }
+
+    fn calc_overlay_id(&self, workchain: i32, shard: u64) -> Result<(Arc<overlay::OverlayShortId>, overlay::OverlayId)> {
+        self.calc_overlay_id(workchain, shard)
     }
 
     fn validation_status(&self) -> ValidationStatus {
@@ -358,7 +366,7 @@ impl EngineOperations for Engine {
         while !((pre_apply && handle.has_state()) || handle.is_applied()) {
             self.block_applying_awaiters().do_or_wait(
                 handle.id(),
-                None,
+                Some(1000),
                 self.clone().apply_block_worker(handle, block, mc_seq_no, pre_apply, recursion_depth)
             ).await?;
         }
@@ -720,9 +728,13 @@ impl EngineOperations for Engine {
         }
 
         // Initialisation of remp_capability after cold boot by first processed master state
+        // same for SMFT
         if state.block_id().shard().is_masterchain() {
             self.set_remp_capability(
                 state.config_params()?.has_capability(GlobalCapabilities::CapRemp),
+            );
+            self.set_smft_capability(
+                state.config_params()?.has_capability(GlobalCapabilities::CapSmft),
             );
         }
         Ok(())
@@ -999,6 +1011,28 @@ impl EngineOperations for Engine {
             .ok_or_else(|| error!("Can't get message status because remp service was not set"))?
             .remp_core_interface()?
             .check_remp_duplicate(message_id)
+    }
+
+    async fn push_message_to_remp(&self, data: ton_api::ton::bytes) -> Result<()> {
+        let (id, _message) = create_ext_message(&data.0)?;
+        let remp_message = ton_api::ton::ton_node::rempmessage::RempMessage {
+            message: data,
+            id: id.clone(),
+            timestamp: 0,
+            signature: Vec::new().into()
+        }.into_boxed();
+        let zero_source = Arc::new(KeyId::from_data([0; 32]));
+        self.network().remp().messages_subscriber()?.new_remp_message(
+            remp_message, &zero_source).await?;
+        Ok(())
+    }
+
+    fn remp_capability(&self) -> bool {
+        Engine::remp_capability(self)
+    }
+
+    fn smft_capability(&self) -> bool {
+        Engine::smft_capability(self)
     }
 
     // Get current list of new shard blocks with respect to last mc block.
